@@ -191,6 +191,37 @@ impl TestServer {
             stdout,
         }
     }
+
+    /// Send SIGHUP so the server reloads zone files in place.
+    #[cfg(unix)]
+    pub fn hangup(&self) {
+        let pid = self.child.id().to_string();
+        let status = std::process::Command::new("kill")
+            .args(["-HUP", &pid])
+            .status()
+            .expect("failed to spawn kill");
+        assert!(status.success(), "kill -HUP {pid} failed: {status}");
+    }
+
+    /// Block until `needle` appears on the server's stdout, or panic after 10s.
+    pub fn wait_for_log(&mut self, needle: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut line = String::new();
+        while Instant::now() < deadline {
+            line.clear();
+            match self.stdout.read_line(&mut line) {
+                Ok(0) => panic!("server stdout closed while waiting for {needle:?}"),
+                Ok(_) => {
+                    print!("SRV: {line}");
+                    if line.contains(needle) {
+                        return;
+                    }
+                }
+                Err(err) => panic!("failed to read server stdout: {err}"),
+            }
+        }
+        panic!("timed out waiting for log line containing {needle:?}");
+    }
 }
 
 impl Drop for TestServer {

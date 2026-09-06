@@ -25,7 +25,12 @@
 //!           --nsid-hostname      Use the system hostname as the name server identifier (NSID) payload for EDNS responses. Mutually exclusive with --nsid
 //!       -h, --help               Print help
 //!       -V, --version            Print version
+//!
+//! Signals (Unix):
+//!       SIGHUP                   Reload named.toml and zone files without dropping listen sockets
+//!       SIGTERM                  Graceful shutdown
 //! ```
+
 
 use clap::Parser;
 #[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]

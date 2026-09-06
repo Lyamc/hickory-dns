@@ -21,6 +21,13 @@ If you are writing your own Rust application, refer to the [`hickory-server`], [
 - ANAME resolution, for zone mapping aliases to A and AAAA records
 - Additionals section generation for aliasing record types
 
+## Signals (Unix)
+
+- `SIGHUP` re-reads the TOML config and all zone files, then swaps the in-memory catalog. Listen sockets stay bound; queries are served throughout. Socket/TLS bind changes still require a process restart.
+- `SIGTERM` shuts the server down.
+
+systemd: `ExecReload=/bin/kill -HUP $MAINPID`
+
 ## Cryptography provider
 
 Features requiring cryptography require selecting a specific cryptography 

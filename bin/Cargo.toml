@@ -66,6 +66,7 @@ path = "src/hickory-dns.rs"
 # - `suggestions` for advanced help with error in cli
 # - `derive` for clap derive api
 # - `help` to generate --help
+async-trait.workspace = true
 cfg-if.workspace = true
 clap = { workspace = true, default-features = false, features = ["cargo", "derive", "help", "std", "suggestions"] }
 futures-util = { workspace = true, default-features = false, features = ["std"] }
@@ -84,7 +85,7 @@ thiserror.workspace = true
 time.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "std"] }
-tokio = { workspace = true, features = ["time", "rt", "signal"] }
+tokio = { workspace = true, features = ["macros", "rt", "signal", "sync", "time"] }
 tokio-util = { workspace = true, optional = true }
 toml.workspace = true
 tower = { workspace = true, features = ["util"], optional = true }

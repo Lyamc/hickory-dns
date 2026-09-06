@@ -46,6 +46,28 @@ async fn test_example_toml_startup() {
     query_a(&mut client).await;
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn test_sighup_reloads_without_dropping_queries() {
+    subscribe();
+    let provider = TokioRuntimeProvider::new();
+    let mut server = TestServer::start("example.toml");
+    let tcp_port = server.ports.get_v4(Protocol::Tcp);
+
+    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, tcp_port.expect("no tcp_port")));
+    let (future, sender) = TcpClientStream::new(addr, None, None, provider.clone());
+    let stream = future.await.expect("failed to create tcp stream");
+    let (mut client, bg) = Client::<TokioRuntimeProvider>::new(stream, sender);
+    tokio::spawn(bg);
+
+    query_a(&mut client).await;
+
+    server.hangup();
+    server.wait_for_log("reload complete");
+
+    query_a(&mut client).await;
+}
+
 #[tokio::test]
 async fn test_ipv4_only_toml_startup() {
     subscribe();

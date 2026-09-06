@@ -20,14 +20,7 @@ use tokio::net::{TcpListener, UdpSocket};
 use tokio::signal::unix::{SignalKind, signal};
 #[cfg(any(feature = "metrics", all(unix, feature = "systemd")))]
 use tokio::time::sleep;
-#[cfg(any(
-    feature = "__tls",
-    feature = "__https",
-    feature = "__quic",
-    all(unix, feature = "systemd"),
-))]
-use tracing::warn;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use hickory_server::proto::ProtoError;
 use hickory_server::proto::rr::rdata::opt::NSIDPayload;
@@ -36,7 +29,9 @@ use hickory_server::server::default_tls_server_config;
 use hickory_server::{server::Server, zone_handler::Catalog};
 
 mod config;
-use config::{Config, TcpSocketConfig, UdpSocketConfig};
+use config::{Config, TcpSocketConfig, UdpSocketConfig, ZoneConfig};
+mod reload;
+use reload::ReloadingCatalog;
 
 #[cfg(feature = "__dnssec")]
 pub mod dnssec;
@@ -197,9 +192,9 @@ impl DnsServer {
             nsid_hostname,
         } = self;
 
-        let config_path = Path::new(&config);
+        let config_path = config;
         info!("loading configuration from: {config_path:?}");
-        let config = Config::read_config(config_path)
+        let config = Config::read_config(&config_path)
             .map_err(|err| format!("failed to read config file from {config_path:?}: {err}"))?;
 
         #[cfg(feature = "prometheus-metrics")]
@@ -260,6 +255,8 @@ impl DnsServer {
             (process_metrics_collector, config_metrics)
         };
 
+        let listen_fp = config_listen_fingerprint(&config);
+
         let Config {
             listen_addrs_ipv4,
             listen_addrs_ipv6,
@@ -300,45 +297,34 @@ impl DnsServer {
             tcp_socket: tcp_socket_config,
         } = config;
 
-        #[cfg(unix)]
-        let mut signal = signal(SignalKind::terminate())
-            .map_err(|e| format!("failed to register signal handler: {e}"))?;
-
-        let mut catalog = Catalog::new();
-        catalog.set_nsid(nsid);
-
-        if nsid_hostname {
-            let hostname =
-                hostname::get().map_err(|e| format!("failed to get system hostname: {e}"))?;
-            let payload = NSIDPayload::new(hostname.into_encoded_bytes())
-                .map_err(|e| format!("invalid NSID payload: {e}"))?;
-            catalog.set_nsid(Some(payload));
-        }
-
-        // configure our server based on the config_path
-        let zone_dir = zonedir.unwrap_or(directory);
-        for zone in zones {
-            let zone_name = zone
-                .zone()
-                .map_err(|err| format!("failed to read zone name from {config_path:?}: {err}"))?;
-
+        let zone_dir = zonedir.clone().unwrap_or(directory);
+        let catalog = load_catalog(
+            &config_path,
+            zones,
+            &zone_dir,
+            nsid.clone(),
+            nsid_hostname,
             #[cfg(feature = "metrics")]
-            config_metrics.increment_zone_metrics(&zone);
-
-            match zone.load(&zone_dir).await {
-                Ok(handlers) => catalog.upsert(zone_name.into(), handlers),
-                Err(err) => return Err(format!("could not load zone {zone_name}: {err}")),
-            }
-        }
+            Some(&config_metrics),
+        )
+        .await?;
+        let catalog = ReloadingCatalog::new(catalog);
 
         if validate {
             info!("configuration files are validated");
             return Ok(());
         }
 
+        #[cfg(unix)]
+        let mut terminate = signal(SignalKind::terminate())
+            .map_err(|e| format!("failed to register SIGTERM handler: {e}"))?;
+        #[cfg(unix)]
+        let mut hangup = signal(SignalKind::hangup())
+            .map_err(|e| format!("failed to register SIGHUP handler: {e}"))?;
+
         // now, run the server, based on the config
         #[cfg_attr(not(feature = "__tls"), allow(unused_mut))]
-        let mut server = Server::with_access(catalog, deny_networks, allow_networks);
+        let mut server = Server::with_access(catalog.clone(), deny_networks, allow_networks);
 
         let mut listen_addrs = listen_addrs_ipv4
             .into_iter()
@@ -431,8 +417,41 @@ impl DnsServer {
         {
             let token = server.shutdown_token().clone();
             tokio::spawn(async move {
-                signal.recv().await;
+                terminate.recv().await;
                 token.cancel();
+            });
+
+            let reloading = catalog.clone();
+            let reload_config_path = config_path.clone();
+            let reload_zone_dir = zone_dir.clone();
+            let reload_nsid = nsid.clone();
+            tokio::spawn(async move {
+                loop {
+                    if hangup.recv().await.is_none() {
+                        break;
+                    }
+                    info!(
+                        path = %reload_config_path.display(),
+                        "SIGHUP received; reloading configuration and zone files"
+                    );
+                    match reload_catalog(
+                        &reload_config_path,
+                        Some(&reload_zone_dir),
+                        reload_nsid.clone(),
+                        nsid_hostname,
+                        &listen_fp,
+                    )
+                    .await
+                    {
+                        Ok(new_catalog) => {
+                            reloading.replace(new_catalog).await;
+                            info!("reload complete");
+                        }
+                        Err(err) => {
+                            error!("reload failed; keeping previous catalog: {err}");
+                        }
+                    }
+                }
             });
         }
 
@@ -498,9 +517,92 @@ impl DnsServer {
     }
 }
 
+async fn load_catalog(
+    config_path: &Path,
+    zones: Vec<ZoneConfig>,
+    zone_dir: &Path,
+    nsid: Option<NSIDPayload>,
+    nsid_hostname: bool,
+    #[cfg(feature = "metrics")] config_metrics: Option<&ConfigMetrics>,
+) -> Result<Catalog, String> {
+    let mut catalog = Catalog::new();
+    catalog.set_nsid(nsid);
+
+    if nsid_hostname {
+        let hostname =
+            hostname::get().map_err(|e| format!("failed to get system hostname: {e}"))?;
+        let payload = NSIDPayload::new(hostname.into_encoded_bytes())
+            .map_err(|e| format!("invalid NSID payload: {e}"))?;
+        catalog.set_nsid(Some(payload));
+    }
+
+    for zone in zones {
+        let zone_name = zone
+            .zone()
+            .map_err(|err| format!("failed to read zone name from {config_path:?}: {err}"))?;
+
+        #[cfg(feature = "metrics")]
+        if let Some(metrics) = config_metrics {
+            metrics.increment_zone_metrics(&zone);
+        }
+
+        match zone.load(zone_dir).await {
+            Ok(handlers) => catalog.upsert(zone_name.into(), handlers),
+            Err(err) => return Err(format!("could not load zone {zone_name}: {err}")),
+        }
+    }
+
+    Ok(catalog)
+}
+
+fn config_listen_fingerprint(config: &Config) -> String {
+    format!(
+        "v4={:?} v6={:?} port={} disable_tcp={} disable_udp={}",
+        config.listen_addrs_ipv4,
+        config.listen_addrs_ipv6,
+        config.listen_port,
+        config.disable_tcp,
+        config.disable_udp
+    )
+}
+
+async fn reload_catalog(
+    config_path: &Path,
+    zonedir: Option<&Path>,
+    nsid: Option<NSIDPayload>,
+    nsid_hostname: bool,
+    previous_listen_fp: &str,
+) -> Result<Catalog, String> {
+    let mut config = Config::read_config(config_path)
+        .map_err(|err| format!("failed to read config file from {config_path:?}: {err}"))?;
+    let new_fp = config_listen_fingerprint(&config);
+    if new_fp != previous_listen_fp {
+        warn!(
+            path = %config_path.display(),
+            previous = %previous_listen_fp,
+            current = %new_fp,
+            "listen/socket settings changed; SIGHUP does not rebind sockets — restart to apply"
+        );
+    }
+    let zone_dir = zonedir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| config.directory.clone());
+    let zones = std::mem::take(&mut config.zones);
+    load_catalog(
+        config_path,
+        zones,
+        &zone_dir,
+        nsid,
+        nsid_hostname,
+        #[cfg(feature = "metrics")]
+        None,
+    )
+    .await
+}
+
 struct ServerSetup<'a> {
     listen_addrs: Vec<IpAddr>,
-    server: &'a mut Server<Catalog>,
+    server: &'a mut Server<ReloadingCatalog>,
     tcp_request_timeout: Duration,
     #[cfg(any(feature = "__tls", feature = "__https", feature = "__quic"))]
     cert_resolver: Option<Arc<dyn ResolvesServerCert>>,
