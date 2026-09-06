@@ -1,4 +1,4 @@
-// Copyright 2026 Lyam Witherow
+// Copyright 2015-2026 Benjamin Fry <benjaminfry@me.com>
 //
 // Licensed under the Apache License, Version 2.0, <LICENSE-APACHE or
 // https://apache.org/licenses/LICENSE-2.0> or the MIT license <LICENSE-MIT or

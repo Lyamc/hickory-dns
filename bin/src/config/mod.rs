@@ -151,6 +151,11 @@ pub(crate) struct Config {
     /// /etc/passwd is not available.
     #[serde(default = "default_drop_privileges")]
     pub(crate) drop_privileges: bool,
+    /// Reload configuration and zone files without dropping listen sockets.
+    /// Default false. Unix/macOS: SIGHUP. Windows: Ctrl+Break.
+    /// Can also be enabled with `--enable-reload`.
+    #[serde(default)]
+    pub(crate) enable_reload: bool,
     /// List of configurations for zones
     #[serde(default)]
     #[serde(deserialize_with = "deserialize_with_file")]

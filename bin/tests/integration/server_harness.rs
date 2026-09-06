@@ -99,6 +99,11 @@ impl TestServer {
     /// Spins up a Server and handles shutting it down after running the test
     #[allow(dead_code)]
     pub fn start(toml: &str) -> Self {
+        Self::start_with_args(toml, &[])
+    }
+
+    /// Like [`Self::start`], with extra CLI arguments (e.g. `--enable-reload`).
+    pub fn start_with_args(toml: &str, extra_args: &[&str]) -> Self {
         let server_path = env::var("TDNS_WORKSPACE_ROOT").unwrap_or_else(|_| "..".to_owned());
         println!("using server src path: {server_path}");
 
@@ -117,6 +122,9 @@ impl TestServer {
             "--zonedir={server_path}/tests/test-data/test_configs"
         ))
         .arg(format!("--port={}", 0));
+        for arg in extra_args {
+            command.arg(arg);
+        }
         #[cfg(feature = "__tls")]
         command.arg(format!("--tls-port={}", 0));
         #[cfg(feature = "__https")]

@@ -40,6 +40,12 @@
 ## directory: path on the host filesystem to where zone files are stored.
 # directory = "/var/named"
 
+## enable_reload: re-read this file and all zone files without dropping listen
+##  sockets. Default false. Unix/macOS: SIGHUP. Windows: Ctrl+Break.
+##  Bind address/port/TLS changes still require a process restart.
+##  Can also be set with --enable-reload.
+# enable_reload = false
+
 ## Denied networks, a list of CIDRs in IPv4 or IPv6 formats,
 ##  any request that does not originate from the specified networks will be allowed
 # deny_networks = ["127.0.0.0/8", "::1/128"]

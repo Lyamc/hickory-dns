@@ -18,6 +18,8 @@ use socket2::{Domain, Socket, Type};
 use tokio::net::{TcpListener, UdpSocket};
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
+#[cfg(windows)]
+use tokio::signal::windows::ctrl_break;
 #[cfg(any(feature = "metrics", all(unix, feature = "systemd")))]
 use tokio::time::sleep;
 use tracing::{error, info, warn};
@@ -158,6 +160,16 @@ pub struct DnsServer {
     /// Mutually exclusive with --nsid
     #[clap(long = "nsid-hostname", conflicts_with = "nsid")]
     nsid_hostname: bool,
+
+    /// Reload configuration and zone files without dropping listen sockets.
+    ///
+    /// Unix (including macOS): SIGHUP.
+    /// Windows: Ctrl+Break.
+    /// Bind address, port, or TLS changes still require a process restart.
+    /// Can also be set with `enable_reload = true` in the config file.
+    /// Default: disabled.
+    #[clap(long = "enable-reload")]
+    enable_reload: bool,
 }
 
 impl DnsServer {
@@ -190,6 +202,7 @@ impl DnsServer {
             disable_prometheus,
             nsid,
             nsid_hostname,
+            enable_reload,
         } = self;
 
         let config_path = config;
@@ -287,6 +300,7 @@ impl DnsServer {
             group,
             zones,
             drop_privileges,
+            enable_reload: config_enable_reload,
             #[cfg(feature = "__tls")]
             tls_cert,
             #[cfg(feature = "__https")]
@@ -309,6 +323,7 @@ impl DnsServer {
         )
         .await?;
         let catalog = ReloadingCatalog::new(catalog);
+        let enable_reload = enable_reload || config_enable_reload;
 
         if validate {
             info!("configuration files are validated");
@@ -319,8 +334,14 @@ impl DnsServer {
         let mut terminate = signal(SignalKind::terminate())
             .map_err(|e| format!("failed to register SIGTERM handler: {e}"))?;
         #[cfg(unix)]
-        let mut hangup = signal(SignalKind::hangup())
-            .map_err(|e| format!("failed to register SIGHUP handler: {e}"))?;
+        let hangup = if enable_reload {
+            Some(
+                signal(SignalKind::hangup())
+                    .map_err(|e| format!("failed to register SIGHUP handler: {e}"))?,
+            )
+        } else {
+            None
+        };
 
         // now, run the server, based on the config
         #[cfg_attr(not(feature = "__tls"), allow(unused_mut))]
@@ -413,6 +434,13 @@ impl DnsServer {
             return Err("dropping privileges is only supported on Unix systems".to_string());
         }
 
+        if enable_reload {
+            #[cfg(unix)]
+            info!("catalog reload enabled (SIGHUP)");
+            #[cfg(windows)]
+            info!("catalog reload enabled (Ctrl+Break)");
+        }
+
         #[cfg(unix)]
         {
             let token = server.shutdown_token().clone();
@@ -421,36 +449,54 @@ impl DnsServer {
                 token.cancel();
             });
 
+            if let Some(mut hangup) = hangup {
+                let reloading = catalog.clone();
+                let reload_config_path = config_path.clone();
+                let reload_zone_dir = zone_dir.clone();
+                let reload_nsid = nsid.clone();
+                tokio::spawn(async move {
+                    loop {
+                        if hangup.recv().await.is_none() {
+                            break;
+                        }
+                        perform_reload(
+                            &reloading,
+                            &reload_config_path,
+                            &reload_zone_dir,
+                            reload_nsid.clone(),
+                            nsid_hostname,
+                            &listen_fp,
+                            "SIGHUP received",
+                        )
+                        .await;
+                    }
+                });
+            }
+        }
+
+        #[cfg(windows)]
+        if enable_reload {
+            let mut break_signal =
+                ctrl_break().map_err(|e| format!("failed to register Ctrl+Break handler: {e}"))?;
             let reloading = catalog.clone();
             let reload_config_path = config_path.clone();
             let reload_zone_dir = zone_dir.clone();
             let reload_nsid = nsid.clone();
             tokio::spawn(async move {
                 loop {
-                    if hangup.recv().await.is_none() {
+                    if break_signal.recv().await.is_none() {
                         break;
                     }
-                    info!(
-                        path = %reload_config_path.display(),
-                        "SIGHUP received; reloading configuration and zone files"
-                    );
-                    match reload_catalog(
+                    perform_reload(
+                        &reloading,
                         &reload_config_path,
-                        Some(&reload_zone_dir),
+                        &reload_zone_dir,
                         reload_nsid.clone(),
                         nsid_hostname,
                         &listen_fp,
+                        "Ctrl+Break received",
                     )
-                    .await
-                    {
-                        Ok(new_catalog) => {
-                            reloading.replace(new_catalog).await;
-                            info!("reload complete");
-                        }
-                        Err(err) => {
-                            error!("reload failed; keeping previous catalog: {err}");
-                        }
-                    }
+                    .await;
                 }
             });
         }
@@ -564,6 +610,30 @@ fn config_listen_fingerprint(config: &Config) -> String {
         config.disable_tcp,
         config.disable_udp
     )
+}
+
+async fn perform_reload(
+    catalog: &ReloadingCatalog,
+    config_path: &Path,
+    zone_dir: &Path,
+    nsid: Option<NSIDPayload>,
+    nsid_hostname: bool,
+    listen_fp: &str,
+    trigger: &str,
+) {
+    info!(
+        path = %config_path.display(),
+        "{trigger}; reloading configuration and zone files"
+    );
+    match reload_catalog(config_path, Some(zone_dir), nsid, nsid_hostname, listen_fp).await {
+        Ok(new_catalog) => {
+            catalog.replace(new_catalog).await;
+            info!("reload complete");
+        }
+        Err(err) => {
+            error!("reload failed; keeping previous catalog: {err}");
+        }
+    }
 }
 
 async fn reload_catalog(

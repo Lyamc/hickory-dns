@@ -51,7 +51,7 @@ async fn test_example_toml_startup() {
 async fn test_sighup_reloads_without_dropping_queries() {
     subscribe();
     let provider = TokioRuntimeProvider::new();
-    let mut server = TestServer::start("example.toml");
+    let mut server = TestServer::start_with_args("example.toml", &["--enable-reload"]);
     let tcp_port = server.ports.get_v4(Protocol::Tcp);
 
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, tcp_port.expect("no tcp_port")));

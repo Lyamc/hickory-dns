@@ -26,11 +26,11 @@
 //!       -h, --help               Print help
 //!       -V, --version            Print version
 //!
-//! Signals (Unix):
-//!       SIGHUP                   Reload named.toml and zone files without dropping listen sockets
+//! Reload (opt-in via --enable-reload or enable_reload = true):
+//!       Unix/macOS               SIGHUP reloads named.toml and zone files in place
+//!       Windows                  Ctrl+Break does the same
 //!       SIGTERM                  Graceful shutdown
 //! ```
-
 
 use clap::Parser;
 #[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]
