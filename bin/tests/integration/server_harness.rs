@@ -98,6 +98,11 @@ pub struct TestServer {
 impl TestServer {
     /// Spins up a Server and handles shutting it down after running the test
     pub fn start(toml: &str) -> Self {
+        Self::start_with_args(toml, &[])
+    }
+
+    /// Like [`Self::start`], with extra CLI arguments (e.g. `--enable-reload`).
+    pub fn start_with_args(toml: &str, extra_args: &[&str]) -> Self {
         let server_path = env::var("TDNS_WORKSPACE_ROOT").unwrap_or_else(|_| "..".to_owned());
         println!("using server src path: {server_path}");
 
@@ -116,6 +121,9 @@ impl TestServer {
             "--zonedir={server_path}/tests/test-data/test_configs"
         ))
         .arg(format!("--port={}", 0));
+        for arg in extra_args {
+            command.arg(arg);
+        }
         #[cfg(feature = "__tls")]
         command.arg(format!("--tls-port={}", 0));
         #[cfg(feature = "__https")]
@@ -189,6 +197,37 @@ impl TestServer {
             child: named,
             stdout,
         }
+    }
+
+    /// Send SIGHUP so the server reloads zone files in place.
+    #[cfg(unix)]
+    pub fn hangup(&self) {
+        let pid = self.child.id().to_string();
+        let status = Command::new("kill")
+            .args(["-HUP", &pid])
+            .status()
+            .expect("failed to spawn kill");
+        assert!(status.success(), "kill -HUP {pid} failed: {status}");
+    }
+
+    /// Block until `needle` appears on the server's stdout, or panic after 10s.
+    pub fn wait_for_log(&mut self, needle: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut line = String::new();
+        while Instant::now() < deadline {
+            line.clear();
+            match self.stdout.read_line(&mut line) {
+                Ok(0) => panic!("server stdout closed while waiting for {needle:?}"),
+                Ok(_) => {
+                    print!("SRV: {line}");
+                    if line.contains(needle) {
+                        return;
+                    }
+                }
+                Err(err) => panic!("failed to read server stdout: {err}"),
+            }
+        }
+        panic!("timed out waiting for log line containing {needle:?}");
     }
 }
 

@@ -21,6 +21,21 @@ If you are writing your own Rust application, refer to the [`hickory-server`], [
 - ANAME resolution, for zone mapping aliases to A and AAAA records
 - Additionals section generation for aliasing record types
 
+## Signals (Unix)
+
+Reload is **opt-in**. Enable with `--enable-reload` or `enable_reload = true` in the TOML config.
+
+When enabled, a reload re-reads the TOML config and all zone files, then swaps the in-memory catalog. Listen sockets stay bound; queries are served throughout. Socket/TLS bind changes still require a process restart.
+
+| Platform | Trigger |
+| --- | --- |
+| Linux, macOS, other Unix | `SIGHUP` (`kill -HUP <pid>`). When disabled, SIGHUP keeps the default terminate action. |
+| Windows | `Ctrl+Break` (console) / `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)` |
+
+- `SIGTERM` (Unix) shuts the server down.
+
+systemd, once enabled: `ExecReload=/bin/kill -HUP $MAINPID`
+
 ## Cryptography provider
 
 Features requiring cryptography require selecting a specific cryptography 

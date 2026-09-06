@@ -25,6 +25,11 @@
 //!           --nsid-hostname      Use the system hostname as the name server identifier (NSID) payload for EDNS responses. Mutually exclusive with --nsid
 //!       -h, --help               Print help
 //!       -V, --version            Print version
+//!
+//! Reload (opt-in via --enable-reload or enable_reload = true):
+//!       Unix/macOS               SIGHUP reloads named.toml and zone files in place
+//!       Windows                  Ctrl+Break does the same
+//!       SIGTERM                  Graceful shutdown
 //! ```
 
 use clap::Parser;
